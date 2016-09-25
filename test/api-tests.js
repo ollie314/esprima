@@ -196,13 +196,18 @@ describe('esprima.parse', function () {
     it('should be able to attach comments', function () {
         var ast, statement, expression, comments;
 
-        ast = esprima.parse('/* universe */ 42', { attachComment: true});
+        ast = esprima.parse('/* universe */ 42', { attachComment: true });
         statement = ast.body[0];
         expression = statement.expression;
         comments = statement.leadingComments;
 
         assert.deepEqual(expression, { type: 'Literal', value: 42, raw: '42' });
         assert.deepEqual(statement.leadingComments, [{ type: 'Block', value: ' universe ', range: [0, 14] }]);
+    });
+
+    it('should not implicity collect comments when comment attachment is specified', function () {
+        var ast = esprima.parse('/* universe */ 42', { attachComment: true });
+        assert.equal(ast.comments, undefined);
     });
 
     it('should include the list of tokens when specified', function () {
@@ -250,8 +255,23 @@ describe('esprima.parse', function () {
 
         assert.deepEqual(expression.type, 'JSXElement');
         assert.deepEqual(expression.openingElement.type, 'JSXOpeningElement');
-        assert.deepEqual(expression.openingElement.name, { type: 'JSXIdentifier', name: 'title'});
+        assert.deepEqual(expression.openingElement.name, { type: 'JSXIdentifier', name: 'title' });
         assert.deepEqual(expression.closingElement, null);
+    });
+
+    it('should never produce shallow copied nodes', function () {
+        var ast, pattern, expr;
+        ast = esprima.parse('let {a, b} = {x, y, z}');
+        pattern = ast.body[0].declarations[0].id;
+        expr = ast.body[0].declarations[0].init;
+        pattern.properties[0].key.name = 'foo';
+        expr.properties[0].key.name = 'bar';
+
+        assert.deepEqual(pattern.properties[0].value, { type: 'Identifier', name: 'a' });
+        assert.deepEqual(pattern.properties[1].value, { type: 'Identifier', name: 'b' });
+        assert.deepEqual(expr.properties[0].value, { type: 'Identifier', name: 'x' });
+        assert.deepEqual(expr.properties[1].value, { type: 'Identifier', name: 'y' });
+        assert.deepEqual(expr.properties[2].value, { type: 'Identifier', name: 'z' });
     });
 });
 

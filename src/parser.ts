@@ -479,6 +479,7 @@ export class Parser {
         const op = this.lookahead.value;
         return op === '=' ||
             op === '*=' ||
+            op === '**=' ||
             op === '/=' ||
             op === '%=' ||
             op === '+=' ||
@@ -793,16 +794,6 @@ export class Parser {
             (key.type === Syntax.Literal && key.value === value);
     }
 
-    checkDuplicatedProto(key, hasProto) {
-        if (this.isPropertyKey(key, '__proto__')) {
-            if (hasProto.value) {
-                this.tolerateError(Messages.DuplicateProtoProperty);
-            } else {
-                hasProto.value = true;
-            }
-        }
-    }
-
     parseObjectProperty(hasProto): Node.Property {
         const node = this.createNode();
         const token = this.lookahead;
@@ -853,8 +844,11 @@ export class Parser {
 
             kind = 'init';
             if (this.match(':')) {
-                if (!computed) {
-                    this.checkDuplicatedProto(key, hasProto);
+                if (!computed && this.isPropertyKey(key, '__proto__')) {
+                    if (hasProto.value) {
+                        this.tolerateError(Messages.DuplicateProtoProperty);
+                    }
+                    hasProto.value = true;
                 }
                 this.nextToken();
                 value = this.inheritCoverGrammar(this.parseAssignmentExpression);
@@ -864,8 +858,7 @@ export class Parser {
                 method = true;
 
             } else if (token.type === Token.Identifier) {
-                this.checkDuplicatedProto(key, hasProto);
-                const id = <Node.Identifier>key;
+                const id = this.finalize(node, new Node.Identifier(token.value));
                 if (this.match('=')) {
                     this.context.firstCoverInitializedNameError = this.lookahead;
                     this.nextToken();
@@ -1109,6 +1102,9 @@ export class Parser {
                     break;
                 }
                 this.expectCommaSeparator();
+                if (this.match(')')) {
+                    break;
+                }
             }
         }
         this.expect(')');
@@ -1256,41 +1252,14 @@ export class Parser {
         return expr;
     }
 
-    // ECMA-262 12.4 Postfix Expressions
+    // ECMA-262 12.4 Update Expressions
 
-    parsePostfixExpression(): Node.Expression {
-        const startToken = this.lookahead;
-        let expr = this.inheritCoverGrammar(this.parseLeftHandSideExpressionAllowCall);
-
-        if (!this.hasLineTerminator && this.lookahead.type === Token.Punctuator) {
-            if (this.match('++') || this.match('--')) {
-                if (this.context.strict && expr.type === Syntax.Identifier && this.scanner.isRestrictedWord(expr.name)) {
-                    this.tolerateError(Messages.StrictLHSPostfix);
-                }
-                if (!this.context.isAssignmentTarget) {
-                    this.tolerateError(Messages.InvalidLHSInAssignment);
-                }
-                this.context.isAssignmentTarget = false;
-                this.context.isBindingElement = false;
-                const operator = this.nextToken().value;
-                const prefix = false;
-                expr = this.finalize(this.startNode(startToken), new Node.UpdateExpression(operator, expr, prefix));
-            }
-        }
-
-        return expr;
-    }
-
-    // ECMA-262 12.5 Unary Operators
-
-    parseUnaryExpression(): Node.Expression {
+    parseUpdateExpression(): Node.Expression {
         let expr;
+        const startToken = this.lookahead;
 
-        if (this.lookahead.type !== Token.Punctuator && this.lookahead.type !== Token.Keyword) {
-            expr = this.parsePostfixExpression();
-
-        } else if (this.match('++') || this.match('--')) {
-            const node = this.startNode(this.lookahead);
+        if (this.match('++') || this.match('--')) {
+            const node = this.startNode(startToken);
             const token = this.nextToken();
             expr = this.inheritCoverGrammar(this.parseUnaryExpression);
             if (this.context.strict && expr.type === Syntax.Identifier && this.scanner.isRestrictedWord(expr.name)) {
@@ -1303,16 +1272,35 @@ export class Parser {
             expr = this.finalize(node, new Node.UpdateExpression(token.value, expr, prefix));
             this.context.isAssignmentTarget = false;
             this.context.isBindingElement = false;
+        } else {
+            expr = this.inheritCoverGrammar(this.parseLeftHandSideExpressionAllowCall);
+            if (!this.hasLineTerminator && this.lookahead.type === Token.Punctuator) {
+                if (this.match('++') || this.match('--')) {
+                    if (this.context.strict && expr.type === Syntax.Identifier && this.scanner.isRestrictedWord(expr.name)) {
+                        this.tolerateError(Messages.StrictLHSPostfix);
+                    }
+                    if (!this.context.isAssignmentTarget) {
+                        this.tolerateError(Messages.InvalidLHSInAssignment);
+                    }
+                    this.context.isAssignmentTarget = false;
+                    this.context.isBindingElement = false;
+                    const operator = this.nextToken().value;
+                    const prefix = false;
+                    expr = this.finalize(this.startNode(startToken), new Node.UpdateExpression(operator, expr, prefix));
+                }
+            }
+        }
 
-        } else if (this.match('+') || this.match('-') || this.match('~') || this.match('!')) {
-            const node = this.startNode(this.lookahead);
-            const token = this.nextToken();
-            expr = this.inheritCoverGrammar(this.parseUnaryExpression);
-            expr = this.finalize(node, new Node.UnaryExpression(token.value, expr));
-            this.context.isAssignmentTarget = false;
-            this.context.isBindingElement = false;
+        return expr;
+    }
 
-        } else if (this.matchKeyword('delete') || this.matchKeyword('void') || this.matchKeyword('typeof')) {
+    // ECMA-262 12.5 Unary Operators
+
+    parseUnaryExpression(): Node.Expression {
+        let expr;
+
+        if (this.match('+') || this.match('-') || this.match('~') || this.match('!') ||
+            this.matchKeyword('delete') || this.matchKeyword('void') || this.matchKeyword('typeof')) {
             const node = this.startNode(this.lookahead);
             const token = this.nextToken();
             expr = this.inheritCoverGrammar(this.parseUnaryExpression);
@@ -1322,13 +1310,29 @@ export class Parser {
             }
             this.context.isAssignmentTarget = false;
             this.context.isBindingElement = false;
-
         } else {
-            expr = this.parsePostfixExpression();
+            expr = this.parseUpdateExpression();
         }
 
         return expr;
     }
+
+    parseExponentiationExpression(): Node.Expression {
+        const startToken = this.lookahead;
+
+        let expr = this.inheritCoverGrammar(this.parseUnaryExpression);
+        if (expr.type !== Syntax.UnaryExpression && this.match('**')) {
+            this.nextToken();
+            this.context.isAssignmentTarget = false;
+            this.context.isBindingElement = false;
+            const left = expr;
+            const right = this.isolateCoverGrammar(this.parseExponentiationExpression);
+            expr = this.finalize(this.startNode(startToken), new Node.BinaryExpression('**', left, right));
+        }
+
+        return expr;
+    }
+
     // ECMA-262 12.6 Multiplicative Operators
     // ECMA-262 12.7 Additive Operators
     // ECMA-262 12.8 Bitwise Shift Operators
@@ -1353,7 +1357,7 @@ export class Parser {
     parseBinaryExpression(): Node.Expression {
         const startToken = this.lookahead;
 
-        let expr = this.inheritCoverGrammar(this.parseUnaryExpression);
+        let expr = this.inheritCoverGrammar(this.parseExponentiationExpression);
 
         let token = this.lookahead;
         let prec = this.binaryPrecedence(token);
@@ -1366,7 +1370,7 @@ export class Parser {
 
             const markers = [startToken, this.lookahead];
             let left = expr;
-            let right = this.isolateCoverGrammar(this.parseUnaryExpression);
+            let right = this.isolateCoverGrammar(this.parseExponentiationExpression);
 
             const stack = [left, token, right];
             while (true) {
@@ -1390,7 +1394,7 @@ export class Parser {
                 token.prec = prec;
                 stack.push(token);
                 markers.push(this.lookahead);
-                stack.push(this.isolateCoverGrammar(this.parseUnaryExpression));
+                stack.push(this.isolateCoverGrammar(this.parseExponentiationExpression));
             }
 
             // Final reduce to clean-up the stack.
@@ -1483,25 +1487,19 @@ export class Parser {
 
         for (let i = 0; i < params.length; ++i) {
             const param = params[i];
-            switch (param.type) {
-                case Syntax.AssignmentPattern:
-                    params[i] = param.left;
-                    if (param.right.type === Syntax.YieldExpression) {
-                        if (param.right.argument) {
-                            this.throwUnexpectedToken(this.lookahead);
-                        }
-                        param.right.type = Syntax.Identifier;
-                        param.right.name = 'yield';
-                        delete param.right.argument;
-                        delete param.right.delegate;
+            if (param.type === Syntax.AssignmentPattern) {
+                if (param.right.type === Syntax.YieldExpression) {
+                    if (param.right.argument) {
+                        this.throwUnexpectedToken(this.lookahead);
                     }
-                    this.checkPatternParam(options, param.left);
-                    break;
-                default:
-                    this.checkPatternParam(options, param);
-                    params[i] = param;
-                    break;
+                    param.right.type = Syntax.Identifier;
+                    param.right.name = 'yield';
+                    delete param.right.argument;
+                    delete param.right.delegate;
+                }
             }
+            this.checkPatternParam(options, param);
+            params[i] = param;
         }
 
         if (this.context.strict || !this.context.allowYield) {
@@ -1702,8 +1700,12 @@ export class Parser {
         let init = null;
         if (kind === 'const') {
             if (!this.matchKeyword('in') && !this.matchContextualKeyword('of')) {
-                this.expect('=');
-                init = this.isolateCoverGrammar(this.parseAssignmentExpression);
+                if (this.match('=')) {
+                    this.nextToken();
+                    init = this.isolateCoverGrammar(this.parseAssignmentExpression);
+                } else {
+                    this.throwError(Messages.DeclarationMissingInitializer, 'const');
+                }
             }
         } else if ((!options.inFor && id.type !== Syntax.Identifier) || this.match('=')) {
             this.expect('=');
@@ -1801,21 +1803,20 @@ export class Parser {
 
         if (this.lookahead.type === Token.Identifier) {
             const keyToken = this.lookahead;
-            const id = this.parseVariableIdentifier();
+            key = this.parseVariableIdentifier();
+            const init = this.finalize(node, new Node.Identifier(keyToken.value));
             if (this.match('=')) {
                 params.push(keyToken);
                 shorthand = true;
                 this.nextToken();
-                key = id;
                 const expr = this.parseAssignmentExpression();
-                value = this.finalize(this.startNode(keyToken), new Node.AssignmentPattern(id, expr));
+                value = this.finalize(this.startNode(keyToken), new Node.AssignmentPattern(init, expr));
             } else if (!this.match(':')) {
                 params.push(keyToken);
                 shorthand = true;
-                key = value = id;
+                value = init;
             } else {
                 this.expect(':');
-                key = id;
                 value = this.parsePatternWithDefault(params, kind);
             }
         } else {
@@ -1853,7 +1854,7 @@ export class Parser {
             pattern = this.parseObjectPattern(params, kind);
         } else {
             if (this.matchKeyword('let') && (kind === 'const' || kind === 'let')) {
-                this.tolerateUnexpectedToken(this.lookahead, Messages.UnexpectedToken);
+                this.tolerateUnexpectedToken(this.lookahead, Messages.LetInLexicalBinding);
             }
             params.push(this.lookahead);
             pattern = this.parseVariableIdentifier(kind);
@@ -2068,6 +2069,10 @@ export class Parser {
                 this.context.allowIn = previousAllowIn;
 
                 if (declarations.length === 1 && this.matchKeyword('in')) {
+                    const decl = declarations[0];
+                    if (decl.init && (decl.id.type === Syntax.ArrayPattern || decl.id.type === Syntax.ObjectPattern || this.context.strict)) {
+                        this.tolerateError(Messages.ForInOfLoopInitializer, 'for-in');
+                    }
                     init = this.finalize(init, new Node.VariableDeclaration(declarations, 'var'));
                     this.nextToken();
                     left = init;
@@ -2126,7 +2131,7 @@ export class Parser {
                 this.context.allowIn = previousAllowIn;
 
                 if (this.matchKeyword('in')) {
-                    if (!this.context.isAssignmentTarget) {
+                    if (!this.context.isAssignmentTarget || init.type === Syntax.AssignmentExpression) {
                         this.tolerateError(Messages.InvalidLHSInForIn);
                     }
 
@@ -2136,7 +2141,7 @@ export class Parser {
                     right = this.parseExpression();
                     init = null;
                 } else if (this.matchContextualKeyword('of')) {
-                    if (!this.context.isAssignmentTarget) {
+                    if (!this.context.isAssignmentTarget || init.type === Syntax.AssignmentExpression) {
                         this.tolerateError(Messages.InvalidLHSInForLoop);
                     }
 
@@ -2636,8 +2641,6 @@ export class Parser {
             this.validateParam(options, params[i], params[i].value);
         }
         options.params.push(param);
-
-        return !this.match(')');
     }
 
     parseFormalParameters(firstRestricted?) {
@@ -2652,10 +2655,14 @@ export class Parser {
         if (!this.match(')')) {
             options.paramSet = {};
             while (this.startMarker.index < this.scanner.length) {
-                if (!this.parseFormalParameter(options)) {
+                this.parseFormalParameter(options);
+                if (this.match(')')) {
                     break;
                 }
                 this.expect(',');
+                if (this.match(')')) {
+                    break;
+                }
             }
         }
         this.expect(')');
